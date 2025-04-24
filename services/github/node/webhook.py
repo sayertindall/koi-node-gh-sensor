@@ -1,9 +1,9 @@
 import logging
 import hmac
 import hashlib
+import json
 from fastapi import APIRouter, Request, Header, HTTPException, Body
 from rid_lib.ext import Bundle
-# Assuming GithubCommit RID type is accessible
 from .types import GithubCommit
 from .core import node
 from .config import (
