@@ -1,0 +1,580 @@
+Directory structure:
+└── slack_sensor_node/
+    ├── __init__.py
+    ├── __main__.py
+    ├── backfill.py
+    ├── config.py
+    ├── core.py
+    ├── dereference.py
+    ├── handlers.py
+    ├── server.py
+    └── slack_event_handlers.py
+
+
+Files Content:
+
+================================================
+FILE: slack_sensor_node/__init__.py
+================================================
+import logging
+from rich.logging import RichHandler
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[RichHandler()]
+)
+
+# logging.getLogger("koi_net").setLevel(logging.DEBUG)
+
+
+================================================
+FILE: slack_sensor_node/__main__.py
+================================================
+import uvicorn
+from .config import HOST, PORT
+
+uvicorn.run("slack_sensor_node.server:app", host=HOST, port=PORT)
+
+
+================================================
+FILE: slack_sensor_node/backfill.py
+================================================
+import asyncio
+import logging
+from slack_sdk.errors import SlackApiError
+from rid_lib.ext import Bundle
+from rid_lib.types import SlackMessage
+from .core import node, slack_app
+from .config import LAST_PROCESSED_TS, OBSERVING_CHANNELS
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+async def auto_retry(function, **params):
+    try:
+        return await function(**params)
+    except SlackApiError as e:
+        if e.response["error"] == "ratelimited":
+            retry_after = int(e.response.headers["Retry-After"])
+            logger.info(f"timed out, waiting {retry_after} seconds")
+            await asyncio.sleep(retry_after)
+            return await function(**params)
+        else:
+            logger.warning("unknown error", e)
+            quit()
+
+async def backfill_messages(
+    channel_ids: list[str] = [], 
+    after: int = 0
+):
+    resp = await slack_app.client.team_info()
+    team = resp.data["team"]
+    team_id = team["id"]
+
+    channels = [{"id": cid} for cid in channel_ids]
+    
+    logger.info("Scanning for channels")
+    
+    # get list of channels
+    channel_cursor = None
+    while not channels or channel_cursor:
+        resp = await slack_app.client.conversations_list(cursor=channel_cursor)
+        result = resp.data
+        channels.extend(result["channels"])
+        logger.info(f"Found {len(result['channels'])} channels")
+        channel_cursor = result.get("response_metadata", {}).get("next_cursor")
+
+    logger.info(f"Scanning {len(channels)} channels for messages")
+    for channel in channels:
+        channel_id = channel["id"]
+        
+        logger.info(f"Scanning {channel_id}...")
+
+        # get list of messages in channel
+        message_cursor = None
+        messages = []
+        while not messages or message_cursor:
+            result = await auto_retry(slack_app.client.conversations_history,
+                channel=channel_id,
+                limit=500,
+                cursor=message_cursor,
+                oldest=after
+            )
+            
+            if not result["messages"]: break
+            
+            messages.extend(result["messages"])
+            logger.info(f"Found {len(result['messages'])} messages")
+            if result["has_more"]:
+                message_cursor = result["response_metadata"]["next_cursor"]
+            else:
+                message_cursor = None
+
+        logger.info(f"Scanning {len(messages)} messages")
+        messages.reverse()
+        for message in messages:
+            message_rid = SlackMessage(team_id, channel_id, message["ts"])
+            
+            if message.get("subtype") is None:
+                
+                message_bundle = Bundle.generate(
+                    rid=message_rid,
+                    contents=message
+                )
+                logger.info(f"{message_rid}")
+                node.processor.handle(bundle=message_bundle)                
+            
+            thread_ts = message.get("thread_ts")
+            
+            # ignore threaded messages sent to channel (double counted within thread)
+            if thread_ts and (thread_ts != message["ts"]):
+                continue
+
+            if thread_ts:
+                threaded_message_cursor = None
+                threaded_messages = []
+                while not threaded_messages or threaded_message_cursor:
+                    result = await auto_retry(slack_app.client.conversations_replies,
+                        channel=channel_id,
+                        ts=thread_ts,
+                        limit=500,
+                        cursor=threaded_message_cursor
+                    )
+                            
+                    threaded_messages.extend(result["messages"])
+                    
+                    if result["has_more"]:
+                        threaded_message_cursor = result["response_metadata"]["next_cursor"]
+                    else:
+                        threaded_message_cursor = None
+                        
+                logger.info(f"{message_rid} thread with {len(threaded_messages)} messages")
+                
+                # don't double count thread parent message
+                for threaded_message in threaded_messages[1:]:
+                    threaded_message_rid = SlackMessage(
+                        team_id, 
+                        channel_id, 
+                        threaded_message["ts"]
+                    )
+                    if threaded_message.get("subtype") is None:
+                        threaded_message_bundle = Bundle.generate(
+                            rid=threaded_message_rid,
+                            contents=threaded_message
+                        )
+                        
+                        logger.info(f"{threaded_message_rid}")
+                        node.processor.handle(bundle=threaded_message_bundle)     
+
+    logger.info("done")
+                        
+if __name__ == "__main__":    
+    node.start()
+    
+    asyncio.run(
+        backfill_messages(
+            channel_ids=OBSERVING_CHANNELS,
+            after=LAST_PROCESSED_TS
+        )
+    )
+    
+    node.stop()
+
+
+================================================
+FILE: slack_sensor_node/config.py
+================================================
+import os
+import json
+from dotenv import load_dotenv
+
+load_dotenv()
+
+HOST = "127.0.0.1"
+PORT = 8001
+URL = f"http://{HOST}:{PORT}/koi-net"
+
+FIRST_CONTACT = "http://127.0.0.1:8000/koi-net"
+
+OBSERVING_CHANNELS = [
+    "C0593RJJ2CW", #koi-research
+    "C082YTFAA83"  #koi-sensor-testing
+]
+
+SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
+SLACK_SIGNING_SECRET = os.environ["SLACK_SIGNING_SECRET"]
+SLACK_APP_TOKEN = os.environ["SLACK_APP_TOKEN"]
+
+try:
+    with open("state.json", "r") as f:
+        LAST_PROCESSED_TS = json.load(f).get("last_processed_ts", 0)
+except FileNotFoundError:
+    LAST_PROCESSED_TS = 0
+
+
+================================================
+FILE: slack_sensor_node/core.py
+================================================
+import logging
+from slack_bolt.async_app import AsyncApp
+from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
+from rid_lib.types import (
+    SlackWorkspace,
+    SlackChannel,
+    SlackUser,
+    SlackMessage
+)
+from koi_net import NodeInterface
+from koi_net.protocol.node import NodeProfile, NodeType, NodeProvides
+from .config import URL, SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, FIRST_CONTACT
+
+logger = logging.getLogger(__name__)
+
+
+node = NodeInterface(
+    name="slack-sensor",
+    profile=NodeProfile(
+        base_url=URL,
+        node_type=NodeType.FULL,
+        provides=NodeProvides(
+            event=[SlackMessage],
+            state=[SlackMessage, SlackUser, SlackChannel, SlackWorkspace]
+        )
+    ),
+    use_kobj_processor_thread=True,
+    first_contact=FIRST_CONTACT
+)
+
+from . import handlers
+
+slack_app = AsyncApp(
+    token=SLACK_BOT_TOKEN,
+    signing_secret=SLACK_SIGNING_SECRET
+)
+
+async_slack_handler = AsyncSlackRequestHandler(slack_app)
+
+from . import slack_event_handlers
+
+
+================================================
+FILE: slack_sensor_node/dereference.py
+================================================
+from rid_lib import RID
+from rid_lib.types import SlackMessage, SlackChannel, SlackUser, SlackWorkspace
+from rid_lib.ext import Bundle
+from koi_net.protocol.api_models import ManifestsPayload, BundlesPayload
+from .core import node, slack_app
+
+async def fetch_missing(payload: ManifestsPayload | BundlesPayload):
+    found_bundles: list[Bundle] = []
+    for rid in payload.not_found:
+        if type(rid) not in (
+            SlackMessage, SlackChannel, SlackUser, SlackWorkspace
+        ): continue
+        
+        bundle = await dereference(rid)
+        if bundle:
+            found_bundles.append(bundle)
+    
+    for bundle in found_bundles:
+        payload.not_found.remove(bundle.rid)
+        
+        if type(payload) == ManifestsPayload:
+            payload.manifests.append(bundle.manifest)
+            
+        elif type(payload) == BundlesPayload:
+            payload.bundles.append(bundle)
+    
+    return payload
+
+async def dereference(rid: RID):
+    if type(rid) == SlackMessage:
+        resp = await slack_app.client.conversations_replies(
+            channel=rid.channel_id,
+            ts=rid.ts
+        )
+        message = resp["messages"][0]
+        
+        return Bundle.generate(rid, message)
+        
+    elif type(rid) == SlackChannel:
+        resp = await slack_app.client.conversations_info(
+            channel=rid.channel_id
+        )
+        channel = resp["channel"]
+        
+        return Bundle.generate(rid, channel)
+        
+    elif type(rid) == SlackUser:
+        profile_resp = await slack_app.client.users_profile_get(user=rid.user_id)
+        profile = profile_resp["profile"]
+        
+        user_resp = await slack_app.client.users_info(user=rid.user_id)
+        user = user_resp["user"]
+        
+        user["profile"] = profile
+        
+        return Bundle.generate(rid, user)
+    
+    elif type(rid) == SlackWorkspace:
+        resp = await slack_app.client.team_info(team=rid.team_id)
+        workspace = resp["team"]
+        
+        return Bundle.generate(rid, workspace)
+    
+    else:
+        raise TypeError(f"RID of type {type(rid)!r} is not allowed")
+
+
+================================================
+FILE: slack_sensor_node/handlers.py
+================================================
+import logging
+import json
+from koi_net.processor.handler import HandlerType
+from koi_net.processor.knowledge_object import KnowledgeSource, KnowledgeObject
+from koi_net.processor.interface import ProcessorInterface
+from koi_net.protocol.event import EventType
+from koi_net.protocol.edge import EdgeType
+from koi_net.protocol.node import NodeProfile
+from koi_net.protocol.helpers import generate_edge_bundle
+from rid_lib.types import KoiNetNode, SlackMessage
+from .config import LAST_PROCESSED_TS
+from .core import node
+
+logger = logging.getLogger(__name__)
+
+
+@node.processor.register_handler(HandlerType.Network, rid_types=[KoiNetNode])
+def coordinator_contact(processor: ProcessorInterface, kobj: KnowledgeObject):
+    # when I found out about a new node
+    if kobj.normalized_event_type != EventType.NEW: 
+        return
+    
+    node_profile = kobj.bundle.validate_contents(NodeProfile)
+    
+    # looking for event provider of nodes
+    if KoiNetNode not in node_profile.provides.event:
+        return
+    
+    logger.info("Identified a coordinator!")
+    logger.info("Proposing new edge")
+    
+    # queued for processing
+    processor.handle(bundle=generate_edge_bundle(
+        source=kobj.rid,
+        target=node.identity.rid,
+        edge_type=EdgeType.WEBHOOK,
+        rid_types=[KoiNetNode]
+    ))
+    
+    logger.info("Catching up on network state")
+    
+    payload = processor.network.request_handler.fetch_rids(kobj.rid, rid_types=[KoiNetNode])
+    for rid in payload.rids:
+        if rid == processor.identity.rid:
+            logger.info("Skipping myself")
+            continue
+        if processor.cache.exists(rid):
+            logger.info(f"Skipping known RID '{rid}'")
+            continue
+        
+        # marked as external since we are handling RIDs from another node
+        # will fetch remotely instead of checking local cache
+        processor.handle(rid=rid, source=KnowledgeSource.External)
+    logger.info("Done")
+    
+@node.processor.register_handler(HandlerType.RID, rid_types=[SlackMessage])
+def update_last_processed_ts(processor: ProcessorInterface, kobj: KnowledgeObject):
+    msg_rid: SlackMessage = kobj.rid
+    ts = float(msg_rid.ts)
+    
+    global LAST_PROCESSED_TS
+    if ts < LAST_PROCESSED_TS: 
+        return
+    
+    LAST_PROCESSED_TS = ts
+    
+    with open("state.json", "w") as f:
+        json.dump({"last_processed_ts": LAST_PROCESSED_TS}, f)
+
+
+================================================
+FILE: slack_sensor_node/server.py
+================================================
+import logging
+import asyncio
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, APIRouter, Request
+from koi_net.processor.knowledge_object import KnowledgeSource
+from koi_net.protocol.api_models import (
+    PollEvents,
+    FetchRids,
+    FetchManifests,
+    FetchBundles,
+    EventsPayload,
+    RidsPayload,
+    ManifestsPayload,
+    BundlesPayload
+)
+from koi_net.protocol.consts import (
+    BROADCAST_EVENTS_PATH,
+    POLL_EVENTS_PATH,
+    FETCH_RIDS_PATH,
+    FETCH_MANIFESTS_PATH,
+    FETCH_BUNDLES_PATH
+)
+from .core import node, async_slack_handler
+from .dereference import fetch_missing
+from .config import LAST_PROCESSED_TS, OBSERVING_CHANNELS
+from . import backfill
+
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):    
+    node.start()
+    
+    asyncio.create_task(
+        backfill.backfill_messages(
+            channel_ids=OBSERVING_CHANNELS,
+            after=LAST_PROCESSED_TS
+        )
+    )
+    
+    yield
+    node.stop()
+
+app = FastAPI(
+    lifespan=lifespan, 
+    title="KOI-net Protocol API",
+    version="1.0.0"
+)
+
+
+@app.post("/slack-event-listener")
+async def slack_listener(request: Request):
+    return await async_slack_handler.handle(request)
+
+koi_net_router = APIRouter(
+    prefix="/koi-net"
+)
+
+@koi_net_router.post(BROADCAST_EVENTS_PATH)
+async def broadcast_events(req: EventsPayload):
+    logger.info(f"Request to {BROADCAST_EVENTS_PATH}, received {len(req.events)} event(s)")
+    for event in req.events:
+        node.processor.handle(event=event, source=KnowledgeSource.External)
+    
+
+@koi_net_router.post(POLL_EVENTS_PATH)
+async def poll_events(req: PollEvents) -> EventsPayload:
+    logger.info(f"Request to {POLL_EVENTS_PATH}")
+    events = node.network.flush_poll_queue(req.rid)
+    return EventsPayload(events=events)
+
+@koi_net_router.post(FETCH_RIDS_PATH)
+async def fetch_rids(req: FetchRids) -> RidsPayload:
+    return node.network.response_handler.fetch_rids(req)
+
+@koi_net_router.post(FETCH_MANIFESTS_PATH)
+async def fetch_manifests(req: FetchManifests) -> ManifestsPayload:
+    manifests_payload = node.network.response_handler.fetch_manifests(req)
+    return await fetch_missing(manifests_payload)
+
+@koi_net_router.post(FETCH_BUNDLES_PATH)
+async def fetch_bundles(req: FetchBundles) -> BundlesPayload:
+    bundles_payload = node.network.response_handler.fetch_bundles(req)
+    return await fetch_missing(bundles_payload)
+
+app.include_router(koi_net_router)
+
+
+================================================
+FILE: slack_sensor_node/slack_event_handlers.py
+================================================
+import logging
+from rid_lib.ext import Bundle
+from rid_lib.types import SlackMessage
+from koi_net.protocol.event import EventType
+from .core import node, slack_app
+from .config import OBSERVING_CHANNELS
+
+logger = logging.getLogger(__name__)
+
+
+@slack_app.event("message")
+async def handle_message_event(event):
+    # with open("slack_sensor/message.json", "w") as f:
+    #     json.dump(event, f, indent=2)
+
+    subtype = event.get("subtype")
+    # new message
+    if not subtype:
+        message_rid = SlackMessage(
+            team_id=event["team"],
+            channel_id=event["channel"],
+            ts=event["ts"]
+        )
+        
+        if message_rid.channel_id not in OBSERVING_CHANNELS:
+            return
+        
+        # normalize to non event message structure
+        data = event
+        del data["channel"]
+        del data["event_ts"]
+        del data["channel_type"]
+        
+        msg_bundle = Bundle.generate(
+            rid=message_rid,
+            contents=data
+        )
+        
+        logger.info(f"Handling new Slack message {message_rid!r}")
+        
+        node.processor.handle(bundle=msg_bundle)
+        
+    
+    elif subtype == "message_changed":
+        message_rid = SlackMessage(
+            team_id=event["message"]["team"],
+            channel_id=event["channel"],
+            ts=event["message"]["ts"]
+        )
+        # normalize to non event message structure
+        data = event["message"]
+        del data["source_team"]
+        del data["user_team"]
+        
+        msg_bundle = Bundle.generate(
+            rid=message_rid,
+            contents=data
+        )
+        
+        logger.info(f"Handling updated Slack message {message_rid!r}")
+        
+        node.processor.handle(bundle=msg_bundle)
+    
+    elif subtype == "message_deleted":
+        message_rid = SlackMessage(
+            team_id=event["previous_message"]["team"],
+            channel_id=event["channel"],
+            ts=event["previous_message"]["ts"]
+        )
+        
+        logger.info(f"Handling deleted Slack message {message_rid!r}")
+        
+        node.processor.handle(
+            rid=message_rid,
+            event_type=EventType.FORGET)
+    
+    else:
+        logger.info(f"Ignoring unsupport Slack message subtype {subtype}")
+        return    
+

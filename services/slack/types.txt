@@ -1,0 +1,131 @@
+
+
+# ---------------------------------------------------------------------------
+# 2. Repository
+# ---------------------------------------------------------------------------
+
+class GithubRepo(ORN):
+    """orn:github.repo:<owner>/<repo>"""
+    namespace = "github.repo"
+
+    def __init__(self, owner: str, repo: str):
+        self.owner, self.repo = owner, repo
+
+    @property
+    def reference(self) -> str:
+        return f"{self.owner}/{self.repo}"
+
+    @classmethod
+    def from_reference(cls, reference: str) -> "GithubRepo":
+        owner, repo = _split(reference, 2, "Repository")
+        return cls(owner, repo)
+
+
+# ---------------------------------------------------------------------------
+# 3. Branch
+# ---------------------------------------------------------------------------
+
+class GithubBranch(ORN):
+    """orn:github.branch:<owner>/<repo>/<branch_name>"""
+    namespace = "github.branch"
+
+    def __init__(self, owner: str, repo: str, branch: str):
+        self.owner, self.repo, self.branch = owner, repo, branch
+
+    @property
+    def reference(self) -> str:
+        return f"{self.owner}/{self.repo}/{self.branch}"
+
+    @classmethod
+    def from_reference(cls, reference: str) -> "GithubBranch":
+        owner, repo, branch = _split(reference, 3, "Branch")
+        return cls(owner, repo, branch)
+
+
+# ---------------------------------------------------------------------------
+# 4. Tag
+# ---------------------------------------------------------------------------
+
+class GithubTag(ORN):
+    """orn:github.tag:<owner>/<repo>/<tag_name>"""
+    namespace = "github.tag"
+
+    def __init__(self, owner: str, repo: str, tag: str):
+        self.owner, self.repo, self.tag = owner, repo, tag
+
+    @property
+    def reference(self) -> str:
+        return f"{self.owner}/{self.repo}/{self.tag}"
+
+    @classmethod
+    def from_reference(cls, reference: str) -> "GithubTag":
+        owner, repo, tag = _split(reference, 3, "Tag")
+        return cls(owner, repo, tag)
+
+
+# ---------------------------------------------------------------------------
+# 5. Pull-Request
+# ---------------------------------------------------------------------------
+
+class GithubPullRequest(ORN):
+    """orn:github.pr:<owner>/<repo>/<pr_number>"""
+    namespace = "github.pr"
+
+    def __init__(self, owner: str, repo: str, number: int | str):
+        self.owner, self.repo, self.number = owner, repo, str(number)
+
+    @property
+    def reference(self) -> str:
+        return f"{self.owner}/{self.repo}/{self.number}"
+
+    @classmethod
+    def from_reference(cls, reference: str) -> "GithubPullRequest":
+        owner, repo, num = _split(reference, 3, "Pull-Request")
+        if not num.isdigit():
+            raise ValueError("PR number must be numeric")
+        return cls(owner, repo, int(num))
+
+
+# ---------------------------------------------------------------------------
+# 6. Issue
+# ---------------------------------------------------------------------------
+
+class GithubIssue(ORN):
+    """orn:github.issue:<owner>/<repo>/<issue_number>"""
+    namespace = "github.issue"
+
+    def __init__(self, owner: str, repo: str, number: int | str):
+        self.owner, self.repo, self.number = owner, repo, str(number)
+
+    @property
+    def reference(self) -> str:
+        return f"{self.owner}/{self.repo}/{self.number}"
+
+    @classmethod
+    def from_reference(cls, reference: str) -> "GithubIssue":
+        owner, repo, num = _split(reference, 3, "Issue")
+        if not num.isdigit():
+            raise ValueError("Issue number must be numeric")
+        return cls(owner, repo, int(num))
+
+
+# ---------------------------------------------------------------------------
+# 7. User
+# ---------------------------------------------------------------------------
+
+class GithubUser(ORN):
+    """orn:github.user:<login>"""
+    namespace = "github.user"
+
+    def __init__(self, login: str):
+        self.login = login
+
+    @property
+    def reference(self) -> str:
+        return self.login
+
+    @classmethod
+    def from_reference(cls, reference: str) -> "GithubUser":
+        if not reference:
+            raise ValueError("Login cannot be empty")
+        return cls(reference)
