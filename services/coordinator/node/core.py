@@ -30,7 +30,7 @@ node = NodeInterface(
         )
     ),
     use_kobj_processor_thread=True,
-    identity_file_path=f"{identity_dir}/{name}_identity.json", # Use the variable
-    event_queues_file_path=f"{identity_dir}/{name}_event_queues.json", # Use the variable
-    cache_directory_path=cache_dir # Use the variable
+    identity_file_path=f"{identity_dir}/{name}_identity.json",
+    event_queues_file_path=f"{identity_dir}/{name}_event_queues.json",
+    cache_directory_path=cache_dir
 )
