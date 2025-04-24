@@ -59,6 +59,8 @@ async def github_webhook(
         if x_github_event != "push":
             logger.debug(f"Ignoring non-'push' event: {x_github_event}")
             return {"message": f"Ignoring event type: {x_github_event}"} 
+        
+        logger.info(f"Processing 'push' event: {payload}")
 
         # --- Process 'push' Event --- 
         repo_info = payload.get("repository", {})
