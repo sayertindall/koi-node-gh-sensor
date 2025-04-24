@@ -37,33 +37,39 @@ async def verify_signature(request: Request, x_hub_signature_256: str = Header(N
     logger.debug("Webhook signature verified successfully.")
 
 
-@router.post("/github/webhook", status_code=202) # Use 202 Accepted as we process async
+@router.post("/github/webhook", status_code=202)  # Use 202 Accepted as we process async
 async def github_webhook(
     request: Request,
-    x_github_event: str = Header(...), # Required header
-    x_hub_signature_256: str = Header(...), # Required for verification
-    payload: dict = Body(...)
+    x_github_event: str = Header(...),  # Required header
+    x_hub_signature_256: str = Header(...)  # Required for verification
 ):
     """Handle incoming GitHub webhook events (specifically 'push')."""
     logger.info(f"Received GitHub webhook event: {x_github_event}")
 
-    try: # Main try block for the entire function
-        # --- Signature Verification --- 
+    try:
+        # --- Signature Verification (Optional) ---
         # await verify_signature(request, x_hub_signature_256)
 
-        # --- Event Handling --- 
+        # --- Parse JSON Payload ---
+        raw_body = await request.body()
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError:
+            logger.error("Invalid JSON in GitHub webhook payload")
+            raise HTTPException(status_code=400, detail="Invalid JSON")
+
+        # --- Event Handling ---
         if x_github_event == "ping":
             logger.info("Received 'ping' event from GitHub. Responding OK.")
             return {"message": "Pong!"}
 
         if x_github_event != "push":
             logger.debug(f"Ignoring non-'push' event: {x_github_event}")
-            return {"message": f"Ignoring event type: {x_github_event}"} 
-        
+            return {"message": f"Ignoring event type: {x_github_event}"}
+
         logger.info(f"Processing 'push' event: {payload}")
 
-        # --- Process 'push' Event --- 
-        payload = payload.get("payload", {})
+        # --- Process 'push' Event ---
         repo_info = payload.get("repository", {})
         repo_full_name = repo_info.get("full_name")
         repo_owner = repo_info.get("owner", {}).get("login") or repo_info.get("owner", {}).get("name")
@@ -72,7 +78,7 @@ async def github_webhook(
         head_commit = payload.get("head_commit", {})
 
         if not repo_full_name or not repo_owner or not repo_name:
-            logger.error(f"Webhook payload missing repository details: {payload.get('repository')}")
+            logger.error(f"Webhook payload missing repository details: {repo_info}")
             raise HTTPException(status_code=400, detail="Missing repository information in payload")
             
         # Check if the repository is monitored
