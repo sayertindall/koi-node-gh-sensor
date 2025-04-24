@@ -63,6 +63,7 @@ async def github_webhook(
         logger.info(f"Processing 'push' event: {payload}")
 
         # --- Process 'push' Event --- 
+        payload = payload.get("payload", {})
         repo_info = payload.get("repository", {})
         repo_full_name = repo_info.get("full_name")
         repo_owner = repo_info.get("owner", {}).get("login") or repo_info.get("owner", {}).get("name")
