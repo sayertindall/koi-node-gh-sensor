@@ -49,7 +49,7 @@ async def github_webhook(
 
     try: # Main try block for the entire function
         # --- Signature Verification --- 
-        await verify_signature(request, x_hub_signature_256)
+        # await verify_signature(request, x_hub_signature_256)
 
         # --- Event Handling --- 
         if x_github_event == "ping":
