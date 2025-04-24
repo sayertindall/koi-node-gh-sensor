@@ -53,7 +53,7 @@ async def github_webhook(
         # --- Parse JSON Payload ---
         raw_body = await request.body()
         try:
-            payload = json.loads(raw_body).get("payload", {})
+            payload = json.loads(raw_body)
         except json.JSONDecodeError:
             logger.error("Invalid JSON in GitHub webhook payload")
             raise HTTPException(status_code=400, detail="Invalid JSON")
